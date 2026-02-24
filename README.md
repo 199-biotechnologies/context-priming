@@ -30,6 +30,122 @@ Task arrives → Agent primes itself → Agent works with optimal context
 
 This is **constructive** (builds the right context) rather than **reductive** (compresses the wrong one).
 
+## Quick Start
+
+### Install
+
+```bash
+pip install -e ".[anthropic]"
+export ANTHROPIC_API_KEY=sk-...
+```
+
+### CLI
+
+```bash
+# Full priming pipeline
+context-prime prime --task "Fix the auth middleware bug" --project ./myapp --verbose
+
+# Gather sources only (see what's available)
+context-prime gather --project ./myapp
+
+# Prime only, output as JSON
+context-prime prime --task "Add pagination" --project . --format json
+```
+
+### Prototype (standalone demo)
+
+```bash
+cd prototype
+pip install -r requirements.txt
+
+# Prime + execute with raw API
+python prime_agent.py "Fix the auth middleware bug" --project /path/to/project --verbose
+
+# Prime only (see the synthesized context)
+python prime_agent.py "Add pagination" --project . --prime-only
+
+# Use Claude Agent SDK for full tool access
+python prime_agent.py "Refactor the database layer" --project . --use-sdk
+```
+
+### As a Library
+
+```python
+from context_prime import gather_all, score_relevance, filter_relevant
+from context_prime import infer_hierarchy, synthesize_context
+
+# Bring your own LLM call
+def my_llm(prompt: str) -> str:
+    return my_api.complete(prompt)
+
+# 1. Gather
+sources = gather_all("./myapp")
+
+# 2. Score + filter
+scored = score_relevance("Fix the auth bug", sources, my_llm)
+relevant = filter_relevant(scored, threshold=0.5)
+
+# 3. Hierarchy
+hierarchy = infer_hierarchy("Fix the auth bug", project_context, my_llm)
+
+# 4. Synthesize
+primed = synthesize_context("Fix the auth bug", hierarchy, relevant, my_llm)
+```
+
+### Claude Agent SDK (recommended for production)
+
+```python
+from context_prime.adapters.claude_sdk import run_primed_agent
+
+await run_primed_agent(
+    task="Fix the auth middleware bug",
+    project_dir="./myapp",
+    agent_model="claude-opus-4-6",
+    priming_model="claude-sonnet-4-6",
+)
+```
+
+### Claude Code Hook (for existing Claude Code users)
+
+Add to `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "*",
+      "hooks": [{
+        "type": "command",
+        "command": "python -m context_prime.cli prime --project $CLAUDE_PROJECT_DIR --mode session --format hook",
+        "timeout": 30
+      }]
+    }]
+  }
+}
+```
+
+## Architecture
+
+```
+context-prime
+│
+├── Core Engine (model-agnostic)
+│   ├── gather.py     — Scan memories, codebase, git, config
+│   ├── score.py      — LLM relevance scoring per task
+│   ├── hierarchy.py  — Outcome hierarchy inference
+│   └── synthesize.py — Merge into primed context block
+│
+├── Adapters
+│   ├── claude_sdk.py  — Claude Agent SDK (full context control)
+│   ├── claude_hook.sh — Claude Code hooks (SessionStart/UserPromptSubmit)
+│   └── raw_api.py     — Any Chat Completions API
+│
+└── CLI
+    └── context-prime prime --task "..." --project ./myapp
+```
+
+The core engine is model-agnostic — every LLM call takes a `callable(prompt) -> str`. The adapters handle platform-specific context injection.
+
 ## Key Differentiators
 
 | Property | Auto-compact | RAG | MEMORY.md | Context Priming |
@@ -42,14 +158,14 @@ This is **constructive** (builds the right context) rather than **reductive** (c
 
 ## Soft Compaction
 
-We call this **"soft compaction"** — it's not compressing what's already in the window, it's *constructing what should be there from scratch*. The distinction matters:
+We call this **"soft compaction"** — it's not compressing what's already in the window, it's *constructing what should be there from scratch*:
 
 - **Hard compaction**: Context is full → summarize/truncate → hope nothing important was lost
 - **Soft compaction**: Task arrives → synthesize optimal context from all sources → start clean
 
 ## Outcome Hierarchy
 
-A unique aspect of Context Priming is goal awareness. Agents don't just see the task — they understand what it serves:
+Agents don't just see the task — they understand what it serves:
 
 ```
 Final Outcome:     Ship the v2 platform by Q2
@@ -59,15 +175,31 @@ Mid-term Goal:     Complete the database migration
 Immediate Task:    Fix the failing migration test
 ```
 
-This prevents narrow optimizations that conflict with broader objectives.
-
 ## Whitepaper
 
-See [`whitepaper/context-priming-whitepaper.md`](whitepaper/context-priming-whitepaper.md) for the full research paper with detailed analysis of existing approaches, the complete architecture proposal, and references.
+See [`whitepaper/context-priming-whitepaper.md`](whitepaper/context-priming-whitepaper.md) for the full research paper with literature survey, architecture proposal, platform analysis, and prototype results.
 
-## Status
+## Project Structure
 
-This is a concept proposal backed by a survey of the current landscape (February 2026). The building blocks exist — memory systems, codebase indexing, planning frameworks, context compression — but nobody has built the orchestration layer that synthesizes them into a single, task-optimized starting context.
+```
+context-priming/
+├── context_prime/          # pip-installable library
+│   ├── core/               # Model-agnostic priming engine
+│   │   ├── gather.py       # Source gathering
+│   │   ├── score.py        # Relevance scoring
+│   │   ├── hierarchy.py    # Outcome hierarchy inference
+│   │   └── synthesize.py   # Context synthesis
+│   ├── adapters/           # Platform integrations
+│   │   ├── claude_sdk.py   # Claude Agent SDK
+│   │   ├── claude_hook.sh  # Claude Code hooks
+│   │   └── raw_api.py      # Raw API (any provider)
+│   └── cli.py              # CLI entry point
+├── prototype/              # Standalone Agent SDK demo
+│   ├── prime_agent.py      # End-to-end prototype
+│   └── example_memories/   # Sample memory files
+├── whitepaper/             # Research paper
+└── pyproject.toml          # Package config
+```
 
 ## Related Work
 
@@ -76,6 +208,7 @@ This is a concept proposal backed by a survey of the current landscape (February
 - [ContextKit](https://github.com/FlineDev/ContextKit) — Planning system for Claude Code
 - [Anthropic's Context Engineering Guide](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)
 - [ContextBench](https://arxiv.org/abs/2602.05892) — Benchmark for context retrieval in coding agents
+- [OpenCode](https://github.com/opencode-ai/opencode) — Open-source AI coding agent (potential integration target)
 
 ## License
 

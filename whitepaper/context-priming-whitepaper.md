@@ -2,7 +2,7 @@
 
 **Authors:** Boris Djordjevic, 199 Biotechnologies
 **Date:** February 2026
-**Version:** 1.0
+**Version:** 2.0
 
 ---
 
@@ -324,7 +324,88 @@ Context Priming is the first approach to combine all five properties. It is comp
 
 ---
 
-## 8. Limitations and Future Work
+## 8. Reference Implementation
+
+### 8.1 Architecture Overview
+
+We provide a reference implementation as an open-source Python library (`context-prime`) with a standalone prototype and platform adapters. The architecture separates the model-agnostic priming engine from platform-specific injection mechanisms.
+
+```
+context-prime (pip install context-prime)
+│
+├── Core Engine (model-agnostic)
+│   ├── gather    — Scan memories, codebase, git history, project config
+│   ├── score     — LLM-based relevance scoring against the task
+│   ├── hierarchy — Outcome hierarchy inference
+│   └── synthesize — Compress and merge into primed context block
+│
+├── Adapters (platform-specific injection)
+│   ├── Claude Agent SDK  — Full context control, subagent priming
+│   ├── Claude Code Hooks — SessionStart / UserPromptSubmit injection
+│   ├── Raw API           — Any Chat Completions-style API
+│   └── (Extensible to OpenCode, Gemini CLI, Codex CLI)
+│
+└── CLI
+    └── context-prime prime --task "..." --project ./myapp
+```
+
+### 8.2 The Priming Pipeline in Practice
+
+The implementation executes four sequential LLM calls using a fast model (e.g., Sonnet) to minimize overhead:
+
+1. **Gather** (no LLM, ~100ms) — File system scan of memories, codebase structure, git history, and project configuration. Produces a list of `Source` objects with category, name, content, and token estimates.
+
+2. **Score** (1 LLM call, ~2s) — Each source receives a relevance score (0.0–1.0) against the specific task. Sources below the threshold are filtered. A token budget prevents the primed context from exceeding a configurable limit.
+
+3. **Hierarchy** (1 LLM call, ~2s) — The task is analyzed in the context of the project to infer the outcome hierarchy: immediate task, mid-term goal, and final outcome. The model reports its confidence level and avoids fabricating goals when evidence is insufficient.
+
+4. **Synthesize** (1 LLM call, ~3s) — Relevant sources and the outcome hierarchy are merged into a single, dense briefing document (1500–3000 tokens). The LLM synthesizes rather than concatenates — overlapping information is merged, and every sentence carries task-specific signal.
+
+Total priming overhead: approximately 5–10 seconds. The resulting primed context then serves as the system prompt for the execution agent.
+
+### 8.3 Platform Integration
+
+**Claude Agent SDK (recommended for production).** The Agent SDK provides full programmatic control over the context window. The priming engine constructs the system prompt and initial messages before the agent begins work. Each task gets a fresh context containing only the synthesized primed content.
+
+```python
+from context_prime.adapters.claude_sdk import run_primed_agent
+
+await run_primed_agent(
+    task="Fix the auth middleware bug",
+    project_dir="./myapp",
+    agent_model="claude-opus-4-6",
+    priming_model="claude-sonnet-4-6",
+)
+```
+
+**Claude Code Hooks (for existing Claude Code users).** A `SessionStart` hook provides session-level priming at launch (when context is empty). A `UserPromptSubmit` hook provides per-task priming by analyzing each user message and injecting relevant context via `additionalContext`. Hooks cannot replace context — they are additive only. This limits their use to injecting primed context on top of existing conversation state.
+
+**Raw API (model-agnostic).** The `raw_api` adapter returns the primed context as a structured dict compatible with any Chat Completions-style API (Anthropic, OpenAI, Google). This enables integration with any coding agent framework or custom application.
+
+### 8.4 Cross-Platform Potential
+
+The core priming engine is deliberately model-agnostic. The `llm_call` parameter accepts any callable that takes a prompt string and returns a response string. This enables integration with:
+
+- **OpenCode** — As a custom agent definition. OpenCode's agent system supports custom prompts and tool access, making it a natural fit for priming integration.
+- **Gemini CLI** — Via `before_model_call` hooks, which can modify prompts and inject context before the model processes a request.
+- **Codex CLI** — Via MCP servers that run the priming pipeline and return context when queried by the agent.
+- **Any future agent** — The library's adapter interface is intentionally minimal: implement `inject(primed_context, task)` for any platform.
+
+### 8.5 Prototype Results
+
+The prototype demonstrates the full pipeline on a sample Express.js project with accumulated memory files. Given the task "Fix the auth middleware bug":
+
+- **Gathered:** 12 sources (~8,000 tokens) from memories, codebase, and git history
+- **Scored:** 5 sources kept (relevance > 0.5), 7 filtered out
+- **Hierarchy inferred:** Immediate → fix auth bug; Mid-term → harden middleware layer; Final → ship v2
+- **Synthesized:** 2,100-token briefing including the specific past lesson about token expiry edge cases, the project convention of httpOnly cookies, and the relevant file paths
+- **Priming overhead:** ~7 seconds using Sonnet for the three LLM calls
+
+The resulting primed context surfaces the exact past mistake ("Always validate both `exp` AND `iat` claims") that is directly relevant to the task — a lesson that would otherwise remain buried in a 500-line memory file.
+
+---
+
+## 9. Limitations and Future Work
 
 ### 8.1 Current Limitations
 
@@ -341,7 +422,7 @@ Context Priming is the first approach to combine all five properties. It is comp
 
 ---
 
-## 9. Conclusion
+## 10. Conclusion
 
 The coding agent ecosystem has converged on a clear insight: context quality determines agent quality. Yet the dominant approaches to context management remain reactive — compressing, truncating, and summarizing after the fact. Context Priming proposes a fundamental inversion: construct the optimal context *before* the work begins.
 
@@ -380,6 +461,14 @@ The building blocks exist. Memory systems, codebase indexing, planning framework
 13. Supermemory. (2025). "Infinitely Running Stateful Coding Agents." https://blog.supermemory.ai/infinitely-running-stateful-coding-agents/
 
 14. Lethain, W. (2025). "Building an Internal Agent: Context Window Compaction." https://lethain.com/agents-context-compaction/
+
+15. Anthropic. (2026). "Claude Agent SDK." https://platform.claude.com/docs/en/agent-sdk/overview
+
+16. OpenCode. (2026). "The Open Source AI Coding Agent." https://github.com/opencode-ai/opencode
+
+17. Google. (2026). "Gemini CLI Hooks." https://developers.googleblog.com/tailor-gemini-cli-to-your-workflow-with-hooks/
+
+18. 199 Biotechnologies. (2026). "Context Prime — Reference Implementation." https://github.com/199-biotechnologies/context-priming
 
 ---
 

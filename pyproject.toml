@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "context-prime"
+version = "0.1.0"
+description = "Proactive context synthesis for coding agents"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "199 Biotechnologies" },
+]
+keywords = ["llm", "coding-agent", "context-engineering", "ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+
+dependencies = []
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40.0"]
+openai = ["openai>=1.0.0"]
+claude-sdk = ["claude-code-sdk>=1.0.0"]
+all = [
+    "anthropic>=0.40.0",
+    "openai>=1.0.0",
+    "claude-code-sdk>=1.0.0",
+]
+
+[project.scripts]
+context-prime = "context_prime.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/199-biotechnologies/context-priming"
+Repository = "https://github.com/199-biotechnologies/context-priming"
+
+[tool.hatch.build.targets.wheel]
+packages = ["context_prime"]
