@@ -1,6 +1,14 @@
-"""Source gathering — scan memories, codebase, git history, and project config."""
+"""Source gathering — scan memories, codebase, git history, and project config.
+
+The gatherer's job is to find ALL potentially relevant sources. It should
+over-gather rather than under-gather — the scoring step handles filtering.
+
+Critical: This includes ACTUAL SOURCE CODE FILES, not just metadata.
+A surgeon needs the patient's cardiac scans, not just the hospital directory.
+"""
 
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,8 +17,8 @@ from pathlib import Path
 @dataclass
 class Source:
     """A single gathered source with metadata."""
-    category: str       # memories, codebase, git, config, external
-    name: str           # human-readable identifier
+    category: str       # memories, codebase, code, git, config
+    name: str           # human-readable identifier (usually relative path)
     content: str        # the actual content
     token_estimate: int = 0  # rough token count (chars / 4)
 
@@ -33,6 +41,29 @@ class GatheredSources:
         return [s for s in self.sources if s.category == category]
 
 
+# File extensions to consider as source code
+CODE_EXTENSIONS = {
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".rb", ".java",
+    ".kt", ".swift", ".c", ".cpp", ".h", ".hpp", ".cs", ".php", ".lua",
+    ".sh", ".bash", ".zsh", ".sql", ".graphql", ".proto",
+    ".yaml", ".yml", ".toml", ".json", ".env.example",
+    ".css", ".scss", ".less", ".html", ".svelte", ".vue",
+    ".tf", ".hcl",  # terraform
+    ".md",  # documentation that may be code-adjacent
+}
+
+# Directories to always skip
+SKIP_DIRS = {
+    ".git", "node_modules", ".venv", "venv", "__pycache__", ".next",
+    ".nuxt", "dist", "build", ".cache", ".tox", ".mypy_cache",
+    ".pytest_cache", "target", "vendor", ".terraform",
+    "coverage", ".nyc_output", "egg-info",
+}
+
+# Max file size to read (skip binaries and huge generated files)
+MAX_FILE_SIZE = 100_000  # ~25k tokens
+
+
 def gather_memories(project_dir: str, memory_paths: list[str] | None = None) -> list[Source]:
     """Scan memory files — MEMORY.md, topic files, .claude/memory/."""
     sources = []
@@ -42,22 +73,24 @@ def gather_memories(project_dir: str, memory_paths: list[str] | None = None) -> 
     if memory_paths:
         search_paths = [Path(p) for p in memory_paths]
     else:
-        # Default memory locations — scoped to this project
+        # Default memory locations — scoped to this project only
         candidates = [
             project / "MEMORY.md",
             project / ".claude" / "memory",
-            Path.home() / ".claude" / "memory",
         ]
-        # Look for project-specific memory directory (keyed by path)
+        # Global memory (shared across projects)
+        global_memory = Path.home() / ".claude" / "memory"
+        if global_memory.is_dir():
+            candidates.append(global_memory)
+
+        # Project-specific memory directory (keyed by path)
         projects_dir = Path.home() / ".claude" / "projects"
         if projects_dir.is_dir():
-            # Find the memory dir that matches this project's path
             project_abs = project.resolve()
+            encoded = str(project_abs).replace("/", "-")
             for pdir in projects_dir.iterdir():
                 if not pdir.is_dir():
                     continue
-                # Claude Code encodes paths with dashes: /Users/foo/bar → -Users-foo-bar
-                encoded = str(project_abs).replace("/", "-")
                 if encoded in pdir.name or pdir.name in encoded:
                     memory_dir = pdir / "memory"
                     if memory_dir.is_dir():
@@ -89,19 +122,21 @@ def gather_memories(project_dir: str, memory_paths: list[str] | None = None) -> 
     return sources
 
 
-def gather_codebase(project_dir: str, max_depth: int = 3) -> list[Source]:
-    """Scan codebase structure — directory tree, key files."""
+def gather_codebase(project_dir: str, max_depth: int = 4) -> list[Source]:
+    """Scan codebase structure and key project files."""
     sources = []
     project = Path(project_dir)
 
-    # Directory tree (limited depth)
+    # Directory tree (for orientation)
     try:
         result = subprocess.run(
             ["find", ".", "-maxdepth", str(max_depth), "-type", "f",
              "-not", "-path", "./.git/*",
              "-not", "-path", "./node_modules/*",
              "-not", "-path", "./.venv/*",
-             "-not", "-path", "./__pycache__/*"],
+             "-not", "-path", "./__pycache__/*",
+             "-not", "-path", "./dist/*",
+             "-not", "-path", "./build/*"],
             capture_output=True, text=True, cwd=project_dir, timeout=10,
         )
         if result.stdout.strip():
@@ -113,7 +148,7 @@ def gather_codebase(project_dir: str, max_depth: int = 3) -> list[Source]:
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
 
-    # Key files that describe the project
+    # Key project files
     key_files = [
         "README.md", "readme.md",
         "package.json", "pyproject.toml", "Cargo.toml", "go.mod",
@@ -124,14 +159,12 @@ def gather_codebase(project_dir: str, max_depth: int = 3) -> list[Source]:
     for fname in key_files:
         fpath = project / fname
         if fpath.is_file():
-            # Deduplicate files (e.g. README.md and readme.md on case-insensitive FS)
             inode = fpath.stat().st_ino
             if inode in seen_inodes:
                 continue
             seen_inodes.add(inode)
 
             content = fpath.read_text(errors="replace")
-            # Truncate very large files
             if len(content) > 8000:
                 content = content[:8000] + "\n\n... [truncated]"
             if content.strip():
@@ -143,11 +176,189 @@ def gather_codebase(project_dir: str, max_depth: int = 3) -> list[Source]:
     return sources
 
 
+def gather_code_files(
+    project_dir: str,
+    task: str = "",
+    max_files: int = 50,
+    max_depth: int = 8,
+) -> list[Source]:
+    """Gather actual source code files relevant to the task.
+
+    This is the critical gatherer that both reviewers flagged as missing.
+    Strategy:
+    1. Extract keywords from the task description
+    2. grep the codebase for files containing those keywords
+    3. Also include files whose NAMES match task keywords
+    4. Read the actual file content — the agent needs the real code
+
+    This is a heuristic pre-filter, not an LLM call. Fast (~100ms).
+    The scoring step will do the nuanced relevance ranking.
+    """
+    sources = []
+    project = Path(project_dir)
+
+    if not task:
+        return sources
+
+    # Extract keywords from task (simple heuristic, no LLM needed)
+    keywords = _extract_keywords(task)
+    if not keywords:
+        return sources
+
+    matched_files: dict[str, float] = {}  # path -> relevance hint
+
+    # Strategy 1: grep for files containing task keywords
+    for keyword in keywords:
+        try:
+            result = subprocess.run(
+                ["grep", "-rl", "--include=*.py", "--include=*.ts",
+                 "--include=*.js", "--include=*.tsx", "--include=*.jsx",
+                 "--include=*.go", "--include=*.rs", "--include=*.rb",
+                 "--include=*.java", "--include=*.swift", "--include=*.c",
+                 "--include=*.cpp", "--include=*.h", "--include=*.cs",
+                 "--include=*.php", "--include=*.yaml", "--include=*.yml",
+                 "--include=*.toml", "--include=*.json", "--include=*.md",
+                 "--include=*.sql", "--include=*.graphql",
+                 "--include=*.html", "--include=*.css", "--include=*.scss",
+                 "--include=*.vue", "--include=*.svelte",
+                 "--include=*.sh", "--include=*.bash",
+                 "--exclude-dir=.git", "--exclude-dir=node_modules",
+                 "--exclude-dir=.venv", "--exclude-dir=__pycache__",
+                 "--exclude-dir=dist", "--exclude-dir=build",
+                 "--exclude-dir=.next", "--exclude-dir=target",
+                 "--exclude-dir=coverage",
+                 "-i",  # case insensitive
+                 keyword, "."],
+                capture_output=True, text=True, cwd=project_dir, timeout=10,
+            )
+            if result.stdout.strip():
+                for fpath in result.stdout.strip().split("\n"):
+                    fpath = fpath.strip().lstrip("./")
+                    if fpath:
+                        matched_files[fpath] = matched_files.get(fpath, 0) + 1
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    # Strategy 2: find files whose names match task keywords
+    for keyword in keywords:
+        kw_lower = keyword.lower()
+        try:
+            result = subprocess.run(
+                ["find", ".", "-maxdepth", str(max_depth), "-type", "f",
+                 "-iname", f"*{kw_lower}*",
+                 "-not", "-path", "./.git/*",
+                 "-not", "-path", "./node_modules/*",
+                 "-not", "-path", "./.venv/*",
+                 "-not", "-path", "./__pycache__/*"],
+                capture_output=True, text=True, cwd=project_dir, timeout=10,
+            )
+            if result.stdout.strip():
+                for fpath in result.stdout.strip().split("\n"):
+                    fpath = fpath.strip().lstrip("./")
+                    if fpath:
+                        # Filename matches are strong signals — boost score
+                        matched_files[fpath] = matched_files.get(fpath, 0) + 3
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    # Strategy 3: recently modified files (git)
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD~10..HEAD"],
+            capture_output=True, text=True, cwd=project_dir, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            for fpath in result.stdout.strip().split("\n"):
+                fpath = fpath.strip()
+                if fpath:
+                    matched_files[fpath] = matched_files.get(fpath, 0) + 0.5
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    # Sort by match count (more keyword hits = more likely relevant)
+    ranked = sorted(matched_files.items(), key=lambda x: x[1], reverse=True)
+
+    # Read the top files
+    for fpath, score in ranked[:max_files]:
+        full_path = project / fpath
+        if not full_path.is_file():
+            continue
+
+        # Skip files that are too large (probably generated)
+        try:
+            size = full_path.stat().st_size
+            if size > MAX_FILE_SIZE:
+                continue
+            if size == 0:
+                continue
+        except OSError:
+            continue
+
+        # Skip non-code files
+        suffix = full_path.suffix.lower()
+        if suffix not in CODE_EXTENSIONS:
+            continue
+
+        try:
+            content = full_path.read_text(errors="replace")
+            if content.strip():
+                sources.append(Source(
+                    category="code",
+                    name=fpath,
+                    content=content,
+                ))
+        except (OSError, UnicodeDecodeError):
+            continue
+
+    return sources
+
+
+def _extract_keywords(task: str) -> list[str]:
+    """Extract search keywords from a task description.
+
+    Simple heuristic: split on spaces/punctuation, keep meaningful words,
+    drop common English stop words. No LLM needed.
+    """
+    stop_words = {
+        "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "do", "does", "did", "will", "would", "could",
+        "should", "may", "might", "shall", "can", "need", "must",
+        "i", "me", "my", "we", "our", "you", "your", "he", "she", "it",
+        "they", "them", "this", "that", "these", "those",
+        "and", "but", "or", "nor", "not", "so", "yet", "both",
+        "in", "on", "at", "to", "for", "of", "with", "by", "from",
+        "up", "out", "if", "then", "than", "too", "very",
+        "just", "about", "also", "all", "any", "each", "every",
+        "how", "what", "when", "where", "which", "who", "why",
+        "add", "fix", "update", "change", "modify", "create", "make",
+        "implement", "write", "build", "improve", "refactor", "remove",
+        "delete", "get", "set", "use", "new", "old",
+    }
+
+    # Split on non-alphanumeric, keep words 2+ chars
+    words = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', task)
+    keywords = []
+    for w in words:
+        lower = w.lower()
+        if lower not in stop_words and len(lower) >= 2:
+            keywords.append(lower)
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for k in keywords:
+        if k not in seen:
+            seen.add(k)
+            unique.append(k)
+
+    return unique[:10]  # Cap at 10 keywords to keep grep fast
+
+
 def gather_git_history(project_dir: str, commit_count: int = 20) -> list[Source]:
     """Scan recent git history — commits, branches, recent changes."""
     sources = []
 
-    def run_git(args: list[str]) -> str | None:
+    def run_git(args: list[str]):
         try:
             result = subprocess.run(
                 ["git"] + args,
@@ -157,8 +368,7 @@ def gather_git_history(project_dir: str, commit_count: int = 20) -> list[Source]
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return None
 
-    # Recent commits
-    log = run_git(["log", f"--oneline", f"-{commit_count}", "--no-decorate"])
+    log = run_git(["log", "--oneline", f"-{commit_count}", "--no-decorate"])
     if log:
         sources.append(Source(
             category="git",
@@ -166,7 +376,6 @@ def gather_git_history(project_dir: str, commit_count: int = 20) -> list[Source]
             content=log,
         ))
 
-    # Current branch and status
     branch = run_git(["branch", "--show-current"])
     status = run_git(["status", "--short"])
     if branch or status:
@@ -176,7 +385,6 @@ def gather_git_history(project_dir: str, commit_count: int = 20) -> list[Source]
             content=f"Branch: {branch or 'unknown'}\n\nStatus:\n{status or 'clean'}",
         ))
 
-    # Recent diff (staged + unstaged, limited)
     diff = run_git(["diff", "--stat", "HEAD~5..HEAD"])
     if diff:
         sources.append(Source(
@@ -193,7 +401,6 @@ def gather_project_config(project_dir: str) -> list[Source]:
     sources = []
     project = Path(project_dir)
 
-    # Look for priority/todo files
     priority_files = [
         "TODO.md", "PRIORITIES.md", "ROADMAP.md",
         ".github/ISSUE_TEMPLATE.md",
@@ -216,11 +423,16 @@ def gather_project_config(project_dir: str) -> list[Source]:
 
 def gather_all(
     project_dir: str,
+    task: str = "",
     memory_paths: list[str] | None = None,
-    max_depth: int = 3,
+    max_depth: int = 4,
     commit_count: int = 20,
+    max_code_files: int = 50,
 ) -> GatheredSources:
     """Gather all sources from a project directory.
+
+    If a task is provided, also gathers actual source code files
+    that match task keywords (heuristic pre-filter via grep).
 
     Returns a GatheredSources object containing everything the priming
     engine needs to work with.
@@ -228,6 +440,7 @@ def gather_all(
     all_sources = []
     all_sources.extend(gather_memories(project_dir, memory_paths))
     all_sources.extend(gather_codebase(project_dir, max_depth))
+    all_sources.extend(gather_code_files(project_dir, task, max_code_files, max_depth * 2))
     all_sources.extend(gather_git_history(project_dir, commit_count))
     all_sources.extend(gather_project_config(project_dir))
 

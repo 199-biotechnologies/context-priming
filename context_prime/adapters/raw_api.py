@@ -35,8 +35,8 @@ def prime_for_api(
             - sources_excluded: List of source names that were filtered out
             - stats: Token counts and source statistics
     """
-    # Gather
-    sources = gather_all(project_dir, memory_paths)
+    # Gather — pass task so code file search can find relevant source files
+    sources = gather_all(project_dir, task=task, memory_paths=memory_paths)
 
     # Score
     scored = score_relevance(task, sources, llm_call)

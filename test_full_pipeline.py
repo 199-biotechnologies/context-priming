@@ -48,7 +48,8 @@ def test_gather():
     from context_prime.core.gather import gather_all
 
     t0 = time.time()
-    sources = gather_all(PROJECT_DIR)
+    task = "Improve the context scoring module to batch sources and reduce LLM calls"
+    sources = gather_all(PROJECT_DIR, task=task)
     elapsed = time.time() - t0
 
     print(f"Gathered {len(sources.sources)} sources in {elapsed:.2f}s")
@@ -117,27 +118,28 @@ def test_hierarchy(task: str, relevant):
 
 
 def test_synthesize(task: str, hierarchy: dict, relevant):
-    """Test 4: Context synthesis."""
-    separator("TEST 4: CONTEXT SYNTHESIS")
-    from context_prime.core.synthesize import synthesize_context, format_primed_context
+    """Test 4: Context assembly (full sources + executive summary)."""
+    separator("TEST 4: CONTEXT ASSEMBLY")
+    from context_prime.core.synthesize import assemble_context
 
     t0 = time.time()
-    synthesized = synthesize_context(task, hierarchy, relevant, openrouter_call)
-    primed = format_primed_context(task, hierarchy, synthesized)
+    primed = assemble_context(task, hierarchy, relevant, openrouter_call)
     elapsed = time.time() - t0
 
-    print(f"Synthesized in {elapsed:.2f}s")
+    print(f"Assembled in {elapsed:.2f}s")
     print(f"Primed context: {len(primed)} chars (~{len(primed)//4} tokens)")
     print()
-    # Print first 1500 chars of the primed context
-    print(primed[:1500])
-    if len(primed) > 1500:
-        print(f"\n  ... [{len(primed) - 1500} more chars]")
+    # Print first 2000 chars of the primed context
+    print(primed[:2000])
+    if len(primed) > 2000:
+        print(f"\n  ... [{len(primed) - 2000} more chars]")
 
-    assert len(synthesized) > 100, "FAIL: Synthesis too short"
+    assert len(primed) > 200, "FAIL: Assembly too short"
     assert "Primed Context" in primed, "FAIL: Missing header"
     assert "Outcome Hierarchy" in primed, "FAIL: Missing hierarchy section"
-    print(f"\n  PASS: Synthesis produced valid primed context")
+    assert "starting point" in primed.lower(), "FAIL: Missing guidance framing"
+    assert "source-content" in primed, "FAIL: Missing trust boundary markers"
+    print(f"\n  PASS: Assembly produced valid primed context with trust boundaries")
     return primed
 
 
@@ -147,18 +149,17 @@ def test_full_pipeline(task: str):
     from context_prime.core.gather import gather_all
     from context_prime.core.score import score_relevance, filter_relevant
     from context_prime.core.hierarchy import infer_hierarchy
-    from context_prime.core.synthesize import synthesize_context, format_primed_context
+    from context_prime.core.synthesize import assemble_context
 
     t0 = time.time()
 
-    # Full pipeline
-    sources = gather_all(PROJECT_DIR)
+    # Full pipeline — pass task to gather so code files are found
+    sources = gather_all(PROJECT_DIR, task=task)
     scored = score_relevance(task, sources, openrouter_call)
     relevant = filter_relevant(scored, threshold=0.4)
     project_ctx = "\n".join(s.source.content[:500] for s in relevant[:5])
     hierarchy = infer_hierarchy(task, project_ctx, openrouter_call)
-    synthesized = synthesize_context(task, hierarchy, relevant, openrouter_call)
-    primed = format_primed_context(task, hierarchy, synthesized)
+    primed = assemble_context(task, hierarchy, relevant, openrouter_call)
 
     elapsed = time.time() - t0
 
@@ -176,7 +177,7 @@ def test_parallel_orchestration():
     from context_prime.core.gather import gather_all
     from context_prime.core.score import score_relevance, filter_relevant
     from context_prime.core.hierarchy import infer_hierarchy
-    from context_prime.core.synthesize import synthesize_context, format_primed_context
+    from context_prime.core.synthesize import assemble_context
 
     tasks = [
         "Add a new API endpoint for user search with pagination",
@@ -184,8 +185,9 @@ def test_parallel_orchestration():
         "Write comprehensive tests for the scoring pipeline",
     ]
 
-    # Gather once (shared across all tasks)
-    sources = gather_all(PROJECT_DIR)
+    # Gather once with combined keywords (shared across all tasks)
+    combined_task = " ".join(tasks)
+    sources = gather_all(PROJECT_DIR, task=combined_task)
     print(f"Shared gather: {len(sources.sources)} sources\n")
 
     def prime_single_task(task: str) -> dict:
@@ -195,8 +197,7 @@ def test_parallel_orchestration():
         relevant = filter_relevant(scored, threshold=0.4)
         project_ctx = "\n".join(s.source.content[:500] for s in relevant[:5])
         hierarchy = infer_hierarchy(task, project_ctx, openrouter_call)
-        synthesized = synthesize_context(task, hierarchy, relevant, openrouter_call)
-        primed = format_primed_context(task, hierarchy, synthesized)
+        primed = assemble_context(task, hierarchy, relevant, openrouter_call)
         elapsed = time.time() - t0
         return {
             "task": task,

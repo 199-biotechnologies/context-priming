@@ -224,7 +224,7 @@ def synthesize(
         s = item["source"]
         sources_block += f"\n### [{s['category']}] {s['name']} (relevance: {item['score']:.1f})\n{s['content']}\n"
 
-    prompt = f"""Synthesize these sources into a primed context for a coding agent.
+    prompt = f"""Write a concise briefing (3-5 sentences) for a coding agent about to work on this task.
 
 Task: {task}
 
@@ -235,14 +235,17 @@ Outcome Hierarchy:
 
 Sources:{sources_block}
 
-Create a dense, task-specific briefing document (1500-3000 tokens).
-Include: relevant file paths, patterns, past lessons, constraints.
-Synthesize — don't concatenate. Every sentence should carry signal."""
+Cover three things:
+1. Point toward the most likely relevant files and patterns
+2. Flag potential complications, edge cases, and pitfalls
+3. Note what's uncertain — areas to investigate rather than assume
+
+Frame as preparation, not prescription. The agent may find unexpected issues."""
 
     return llm_call(client, prompt)
 
 
-def prime(client: Anthropic, task: str, project_dir: str, verbose: bool = False) -> str:
+def prime(client: Anthropic, task: str, project_dir: str, verbose: bool = False, priming_model: str = PRIMING_MODEL) -> str:
     """Run the full priming pipeline. Returns the primed context."""
     t0 = time.time()
 
@@ -302,14 +305,14 @@ def prime(client: Anthropic, task: str, project_dir: str, verbose: bool = False)
 # Execution — launch agent with primed context
 # ---------------------------------------------------------------------------
 
-def run_with_raw_api(client: Anthropic, task: str, primed_context: str):
+def run_with_raw_api(client: Anthropic, task: str, primed_context: str, model: str = AGENT_MODEL):
     """Run the coding agent using the raw Messages API."""
     print("\n" + "=" * 60)
     print("PRIMED AGENT EXECUTING")
     print("=" * 60 + "\n")
 
     response = client.messages.create(
-        model=AGENT_MODEL,
+        model=model,
         max_tokens=8192,
         system=primed_context,
         messages=[{"role": "user", "content": task}],
@@ -318,7 +321,7 @@ def run_with_raw_api(client: Anthropic, task: str, primed_context: str):
     print(response.content[0].text)
 
 
-async def run_with_agent_sdk(task: str, primed_context: str, project_dir: str):
+async def run_with_agent_sdk(task: str, primed_context: str, project_dir: str, model: str = AGENT_MODEL):
     """Run the coding agent using the Claude Agent SDK."""
     try:
         from claude_code_sdk import query, ClaudeCodeOptions
@@ -330,7 +333,7 @@ async def run_with_agent_sdk(task: str, primed_context: str, project_dir: str):
         options = ClaudeCodeOptions(
             system_prompt=primed_context,
             cwd=project_dir,
-            model=AGENT_MODEL,
+            model=model,
         )
 
         async for msg in query(prompt=task, options=options):
@@ -378,14 +381,13 @@ def main():
         print(f"Error: {project_dir} is not a directory.", file=sys.stderr)
         sys.exit(1)
 
-    global PRIMING_MODEL, AGENT_MODEL
-    PRIMING_MODEL = args.priming_model
-    AGENT_MODEL = args.agent_model
-
     client = Anthropic()
 
     # --- Prime ---
-    primed_context = prime(client, args.task, project_dir, verbose=args.verbose)
+    primed_context = prime(
+        client, args.task, project_dir,
+        verbose=args.verbose, priming_model=args.priming_model,
+    )
 
     if args.prime_only:
         print(primed_context)
@@ -397,15 +399,16 @@ def main():
         print("\n--- END PRIMED CONTEXT ---\n", file=sys.stderr)
 
     # --- Execute ---
+    agent_model = args.agent_model
     if args.use_sdk:
         success = asyncio.run(
-            run_with_agent_sdk(args.task, primed_context, project_dir)
+            run_with_agent_sdk(args.task, primed_context, project_dir, agent_model)
         )
         if not success:
             print("[fallback] Agent SDK not available, using raw API.", file=sys.stderr)
-            run_with_raw_api(client, args.task, primed_context)
+            run_with_raw_api(client, args.task, primed_context, agent_model)
     else:
-        run_with_raw_api(client, args.task, primed_context)
+        run_with_raw_api(client, args.task, primed_context, agent_model)
 
 
 if __name__ == "__main__":

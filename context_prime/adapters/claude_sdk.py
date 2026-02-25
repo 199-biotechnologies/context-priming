@@ -56,8 +56,8 @@ def prime(
     """
     llm_call = make_anthropic_llm_call(priming_model)
 
-    # 1. Gather all sources
-    sources = gather_all(project_dir, memory_paths)
+    # 1. Gather all sources — pass task so grep finds relevant code files
+    sources = gather_all(project_dir, task=task, memory_paths=memory_paths)
 
     # 2. Score relevance against the task
     scored = score_relevance(task, sources, llm_call)
@@ -76,7 +76,7 @@ def prime(
     hierarchy = infer_hierarchy(task, project_context, llm_call)
 
     # 5. Assemble — full source content + brief executive summary
-    return assemble_context(task, hierarchy, relevant, llm_call)
+    return assemble_context(task, hierarchy, relevant, llm_call, platform=platform)
 
 
 async def run_primed_agent(

@@ -148,8 +148,8 @@ Task Received
            │
            ▼
 ┌─────────────────────────┐
-│   4. SYNTHESIS           │  Compress and interleave relevant sources
-│                          │  into a coherent, task-optimized context
+│   4. ASSEMBLY            │  Assemble relevant sources with full content,
+│                          │  brief executive summary, and complication flags
 └──────────┬──────────────┘
            │
            ▼
@@ -190,7 +190,23 @@ Immediate Task:    Fix the failing migration test
 
 An agent that only sees "fix the failing migration test" may apply a narrow patch. An agent that understands the outcome hierarchy will fix the test *in a way that serves the migration*, which serves the v2 launch. This awareness changes the agent's decisions about trade-offs, code quality, test coverage, and error handling.
 
-### 4.5 Cold-Start Priming
+### 4.5 Guidance, Not Constraint — The Surgical Analogy
+
+A critical design principle of Context Priming is that the primed context must **inform** the agent, not **constrain** it. The analogy is surgical preparation: a surgeon reviewing pre-operative imaging (CT scans, MRI, patient history) before performing heart surgery. The imaging highlights the most likely areas of concern, flags potential complications, and ensures the surgeon enters the operating room with the right knowledge loaded. But it does not dictate what the surgeon does once the chest is open.
+
+In practice, the actual situation nearly always differs from what the imaging shows. The surgeon finds unexpected adhesions, unanticipated anatomy, complications that weren't visible on scans. The preparation *informs the starting point* but the surgeon must remain free to adapt, explore, and respond to what they actually find.
+
+Context Priming follows the same principle:
+
+1. **Point toward likely relevant files and patterns** — the pre-operative imaging
+2. **Flag potential complications and edge cases** — warnings from past experience and project history
+3. **Note areas of uncertainty** — where the agent should investigate rather than assume
+4. **Remind the agent of available tools** — subagents, parallel sessions, search, shell access
+5. **Explicitly encourage exploration beyond the primed context** — the priming is a starting point, not a complete picture
+
+The primed context should never say "here is everything you need." It should say "here is what we know so far — now go look for yourself."
+
+### 4.6 Cold-Start Priming
 
 A distinctive capability of Context Priming is operating from zero prior context. When encountering an unfamiliar project or domain, the agent can:
 
@@ -200,7 +216,7 @@ A distinctive capability of Context Priming is operating from zero prior context
 
 This transforms the cold-start problem from "the agent knows nothing" to "the agent has done its homework."
 
-### 4.6 Soft Compaction vs. Hard Compaction
+### 4.7 Soft Compaction vs. Hard Compaction
 
 We introduce the term **"soft compaction"** to distinguish Context Priming from traditional compaction:
 
@@ -211,7 +227,7 @@ We introduce the term **"soft compaction"** to distinguish Context Priming from 
 | **Input** | Current context window contents | All available knowledge sources |
 | **Output** | Shorter version of existing context | Task-optimized starting context |
 | **Task awareness** | None (compresses everything equally) | Full (curates for specific task) |
-| **Information loss** | Inevitable (compression is lossy) | Minimal (selects rather than compresses) |
+| **Information loss** | Inevitable (compression is lossy) | Minimal (selects full sources, guides exploration) |
 
 ---
 
@@ -337,7 +353,7 @@ context-prime (pip install context-prime)
 │   ├── gather    — Scan memories, codebase, git history, project config
 │   ├── score     — LLM-based relevance scoring against the task
 │   ├── hierarchy — Outcome hierarchy inference
-│   └── synthesize — Compress and merge into primed context block
+│   └── synthesize — Assemble full sources + brief executive summary
 │
 ├── Adapters (platform-specific injection)
 │   ├── Claude Agent SDK  — Full context control, subagent priming
@@ -359,9 +375,9 @@ The implementation executes four sequential LLM calls using a fast model (e.g., 
 
 3. **Hierarchy** (1 LLM call, ~2s) — The task is analyzed in the context of the project to infer the outcome hierarchy: immediate task, mid-term goal, and final outcome. The model reports its confidence level and avoids fabricating goals when evidence is insufficient.
 
-4. **Synthesize** (1 LLM call, ~3s) — Relevant sources and the outcome hierarchy are merged into a single, dense briefing document (1500–3000 tokens). The LLM synthesizes rather than concatenates — overlapping information is merged, and every sentence carries task-specific signal.
+4. **Assemble** (1 LLM call, ~2s) — Relevant sources are assembled into a primed context block that includes their **full content** (not compressed summaries). A single fast LLM call generates a brief executive summary (3–5 sentences) that points toward likely relevant files, flags potential complications and edge cases, and notes areas of uncertainty. The sources themselves are included verbatim within trust-boundary markers. A capabilities reminder tells the agent what tools it has access to (subagents, search, parallel work). The primed context is explicitly framed as a starting point — the agent may discover unexpected issues and should explore beyond what's provided.
 
-Total priming overhead: approximately 5–10 seconds. The resulting primed context then serves as the system prompt for the execution agent.
+Total priming overhead: approximately 5–8 seconds. The resulting primed context uses up to 25% of the platform's available coding context (e.g., ~30k tokens for Claude Code's 120k), and serves as the system prompt for the execution agent.
 
 ### 8.3 Platform Integration
 

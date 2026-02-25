@@ -48,7 +48,7 @@ def get_llm_call(model: str = "claude-sonnet-4-6"):
 
         def call(prompt: str) -> str:
             r = client.chat.completions.create(
-                model="gpt-4o",
+                model=model,
                 max_tokens=4096,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -78,7 +78,10 @@ def cmd_prime(args):
         print("[gather] Scanning sources...", file=sys.stderr)
 
     memory_paths = args.memory.split(",") if args.memory else None
-    sources = gather_all(project_dir, memory_paths)
+    task = args.task or ""
+
+    # Gather — pass task so grep can find relevant code files
+    sources = gather_all(project_dir, task=task, memory_paths=memory_paths)
 
     if args.verbose:
         print(
@@ -86,37 +89,39 @@ def cmd_prime(args):
             f"(~{sources.total_tokens} tokens)",
             file=sys.stderr,
         )
+        for s in sources.sources:
+            print(f"         [{s.category:10s}] {s.name}", file=sys.stderr)
 
-    if args.mode == "session" and not args.task:
-        # Session mode: include full source content, no scoring needed
+    if args.mode == "session" and not task:
+        # Session mode: include project structure + memories (no code grep without task)
         output = "## Project Context (auto-primed at session start)\n\n"
         for src in sources.sources:
             output += f"### [{src.category}] {src.name}\n{src.content}\n\n"
-
         print(output)
         return
 
-    task = args.task or "General development work"
+    if not task:
+        task = "General development work"
 
     # Score
     if args.verbose:
         print("[score] Scoring relevance...", file=sys.stderr)
     scored = score_relevance(task, sources, llm_call)
 
-    # Filter — budget is % of available context, include full content
+    # Filter — budget is % of available context
     relevant = filter_relevant(
         scored, args.threshold,
         context_budget_pct=args.budget,
         platform=args.platform,
     )
     if args.verbose:
-        budget_tokens = int({
-            "claude_code": 120_000, "claude_api": 200_000,
-            "gemini_cli": 1_000_000, "default": 128_000,
-        }.get(args.platform, 128_000) * args.budget)
+        from context_prime.core.score import PLATFORM_CONTEXT_BUDGETS
+        total = PLATFORM_CONTEXT_BUDGETS.get(args.platform, 128_000)
+        budget_tokens = int(total * args.budget)
+        kept_tokens = sum(s.source.token_estimate for s in relevant)
         print(
             f"[filter] Kept {len(relevant)}/{len(scored)} sources "
-            f"(budget: {args.budget:.0%} = ~{budget_tokens:,} tokens)",
+            f"({kept_tokens:,} tokens, budget: {budget_tokens:,})",
             file=sys.stderr,
         )
 
@@ -129,7 +134,7 @@ def cmd_prime(args):
     # Assemble — full source content + brief exec summary
     if args.verbose:
         print("[assemble] Building primed context...", file=sys.stderr)
-    primed = assemble_context(task, hierarchy, relevant, llm_call)
+    primed = assemble_context(task, hierarchy, relevant, llm_call, platform=args.platform)
 
     # Output
     if args.format == "json":
