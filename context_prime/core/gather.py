@@ -60,6 +60,13 @@ SKIP_DIRS = {
     "coverage", ".nyc_output", "egg-info",
 }
 
+# Files to always skip (even if extension matches)
+SKIP_FILES = {
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "poetry.lock", "Pipfile.lock", "Gemfile.lock",
+    "composer.lock", "Cargo.lock", "go.sum",
+}
+
 # Max file size to read (skip binaries and huge generated files)
 MAX_FILE_SIZE = 100_000  # ~25k tokens
 
@@ -261,19 +268,24 @@ def gather_code_files(
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
 
-    # Strategy 3: recently modified files (git)
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--name-only", "HEAD~10..HEAD"],
-            capture_output=True, text=True, cwd=project_dir, timeout=10,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            for fpath in result.stdout.strip().split("\n"):
-                fpath = fpath.strip()
-                if fpath:
-                    matched_files[fpath] = matched_files.get(fpath, 0) + 0.5
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+    # Strategy 3: recently modified files (git) — with fallback chain
+    for git_cmd in [
+        ["git", "diff", "--name-only", "HEAD~10..HEAD"],  # recent commits
+        ["git", "diff", "--name-only", "HEAD"],            # unstaged changes
+        ["git", "diff", "--name-only", "--cached"],        # staged changes
+    ]:
+        try:
+            result = subprocess.run(
+                git_cmd,
+                capture_output=True, text=True, cwd=project_dir, timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                for fpath in result.stdout.strip().split("\n"):
+                    fpath = fpath.strip()
+                    if fpath:
+                        matched_files[fpath] = matched_files.get(fpath, 0) + 0.5
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
 
     # Sort by match count (more keyword hits = more likely relevant)
     ranked = sorted(matched_files.items(), key=lambda x: x[1], reverse=True)
@@ -292,6 +304,10 @@ def gather_code_files(
             if size == 0:
                 continue
         except OSError:
+            continue
+
+        # Skip lock files and other known garbage
+        if full_path.name in SKIP_FILES:
             continue
 
         # Skip non-code files

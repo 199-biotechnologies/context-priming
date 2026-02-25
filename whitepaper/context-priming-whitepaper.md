@@ -367,7 +367,7 @@ context-prime (pip install context-prime)
 
 ### 8.2 The Priming Pipeline in Practice
 
-The implementation executes four sequential LLM calls using a fast model (e.g., Sonnet) to minimize overhead:
+The implementation executes three LLM calls using a fast model (e.g., Sonnet) to minimize overhead:
 
 1. **Gather** (no LLM, ~100ms) — File system scan of memories, codebase structure, git history, and project configuration. Produces a list of `Source` objects with category, name, content, and token estimates.
 
@@ -423,13 +423,13 @@ The resulting primed context surfaces the exact past mistake ("Always validate b
 
 ## 9. Limitations and Future Work
 
-### 8.1 Current Limitations
+### 9.1 Current Limitations
 
 - **Priming overhead.** The synthesis step consumes tokens and time before any "real" work begins. For simple tasks, this overhead may not be justified.
 - **Quality dependency.** Priming quality depends on the quality of available memories and codebase documentation. Garbage in, curated garbage out.
 - **Outcome hierarchy accuracy.** Inferring the correct outcome hierarchy from a task description is itself an LLM inference challenge that may introduce errors.
 
-### 8.2 Future Directions
+### 9.2 Future Directions
 
 - **Adaptive priming depth.** Automatically calibrate priming thoroughness based on task complexity — simple tasks get light priming, complex tasks get deep synthesis.
 - **Collaborative priming.** In multi-agent systems, agents could share and merge primed contexts.

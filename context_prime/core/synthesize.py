@@ -54,11 +54,12 @@ Outcome Hierarchy:
 - Mid-term: {midterm}
 - Final: {final}
 
-Key sources available: {source_names}
+Key source previews (highest relevance first):
+{source_previews}
 
 Write ONLY the briefing paragraph. Cover three things:
-1. Point toward the most likely relevant files and patterns
-2. Flag potential complications, edge cases, and pitfalls from past lessons — things that could go wrong or be different than expected
+1. Point toward the most likely relevant files and patterns based on the source content above
+2. Flag potential complications, edge cases, and pitfalls you see in the sources — things that could go wrong or be different than expected
 3. Note what's uncertain — areas where the agent should investigate further rather than assume
 
 Frame this as preparation, not a prescription. The actual situation may differ from what the sources suggest. No headers, no formatting — just the paragraph."""
@@ -120,15 +121,26 @@ def assemble_context(
 
     # Brief executive summary (1 LLM call, fast)
     if llm_call:
-        source_names = ", ".join(
-            f"{s.source.name} ({s.source.category})" for s in relevant_sources
-        )
+        # Give the LLM actual source previews so it can flag real pitfalls,
+        # not just hallucinate generic warnings based on source names alone.
+        preview_parts = []
+        preview_budget = 3000  # chars total for previews (keeps prompt compact)
+        per_source = max(200, preview_budget // max(1, len(relevant_sources)))
+        for s in relevant_sources:
+            preview = s.source.content[:per_source].strip()
+            if len(s.source.content) > per_source:
+                preview += "..."
+            preview_parts.append(
+                f"- [{s.source.category}] {s.source.name} (score {s.score:.1f}): {preview}"
+            )
+        source_previews = "\n".join(preview_parts)
+
         prompt = BRIEF_SYNTHESIS_PROMPT.format(
             task=task,
             immediate=immediate,
             midterm=midterm or "Not inferred",
             final=final or "Not inferred",
-            source_names=source_names,
+            source_previews=source_previews,
         )
         summary = llm_call(prompt)
         parts.append("## Summary\n")
@@ -157,7 +169,9 @@ def assemble_context(
             f"(relevance: {ss.score:.2f})\n"
         )
         parts.append(f"<source-content name=\"{ss.source.name}\">")
-        parts.append(ss.source.content)
+        # Escape closing tags to prevent trust boundary breakout
+        safe_content = ss.source.content.replace("</source-content>", "&lt;/source-content&gt;")
+        parts.append(safe_content)
         parts.append("</source-content>")
         parts.append("")
 

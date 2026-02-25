@@ -62,9 +62,9 @@ def parse_scores(response_text: str, sources: GatheredSources) -> list[ScoredSou
     # Extract JSON from response (handle markdown code blocks)
     json_match = re.search(r'\[[\s\S]*\]', response_text)
     if not json_match:
-        # Fallback: score everything at 0.5
+        # Fail-closed: low score so threshold filter excludes by default
         return [
-            ScoredSource(source=s, score=0.5, reasoning="Scoring failed, default score")
+            ScoredSource(source=s, score=0.2, reasoning="Scoring parse failed — fail-closed")
             for s in sources.sources
         ]
 
@@ -72,7 +72,7 @@ def parse_scores(response_text: str, sources: GatheredSources) -> list[ScoredSou
         scores = json.loads(json_match.group())
     except json.JSONDecodeError:
         return [
-            ScoredSource(source=s, score=0.5, reasoning="Scoring failed, default score")
+            ScoredSource(source=s, score=0.2, reasoning="Scoring parse failed — fail-closed")
             for s in sources.sources
         ]
 
@@ -143,6 +143,9 @@ def filter_relevant(
     available context with highly relevant sources — the value is in
     selection, not compression.
 
+    Uses categorical budgets to ensure memories and config sources aren't
+    crowded out by code files, even if code scores slightly higher.
+
     Args:
         scored_sources: Sources with scores, sorted by score descending.
         threshold: Minimum score to include (default 0.5).
@@ -159,15 +162,40 @@ def filter_relevant(
         )
         max_tokens = int(total_context * context_budget_pct)
 
-    filtered = []
-    token_count = 0
+    # Reserve a portion of budget for non-code categories (memories, config, git)
+    # This prevents code files from crowding out the lessons and priorities
+    # that are the whole point of Context Priming.
+    reserved_categories = {"memories", "config"}
+    reserved_budget = int(max_tokens * 0.15)  # 15% reserved for memories+config
+    code_budget = max_tokens - reserved_budget
 
-    for ss in scored_sources:
+    # First pass: include reserved-category sources that meet threshold
+    filtered = []
+    reserved_tokens = 0
+    code_tokens = 0
+
+    # Separate into reserved and general pools
+    reserved_pool = [ss for ss in scored_sources if ss.source.category in reserved_categories]
+    general_pool = [ss for ss in scored_sources if ss.source.category not in reserved_categories]
+
+    # Fill reserved pool first (memories, config)
+    for ss in reserved_pool:
         if ss.score < threshold:
             continue
-        if token_count + ss.source.token_estimate > max_tokens:
+        if reserved_tokens + ss.source.token_estimate > reserved_budget:
             continue
         filtered.append(ss)
-        token_count += ss.source.token_estimate
+        reserved_tokens += ss.source.token_estimate
 
+    # Fill general pool (code, codebase, git) with remaining budget
+    for ss in general_pool:
+        if ss.score < threshold:
+            continue
+        if code_tokens + ss.source.token_estimate > code_budget:
+            continue
+        filtered.append(ss)
+        code_tokens += ss.source.token_estimate
+
+    # Re-sort by score descending for assembly
+    filtered.sort(key=lambda s: s.score, reverse=True)
     return filtered

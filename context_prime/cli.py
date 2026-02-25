@@ -18,7 +18,13 @@ def get_llm_call(model: str = "claude-sonnet-4-6"):
         # Map short model names to OpenRouter format
         or_model = model
         if "/" not in model:
-            or_model = f"anthropic/{model}"
+            # Only prefix known Anthropic model names
+            if any(model.startswith(p) for p in ("claude-", "claude_")):
+                or_model = f"anthropic/{model}"
+            elif any(model.startswith(p) for p in ("gpt-", "o1-", "o3-", "o4-")):
+                or_model = f"openai/{model}"
+            elif model.startswith("gemini-"):
+                or_model = f"google/{model}"
 
         def call(prompt: str) -> str:
             r = client.chat.completions.create(
@@ -94,9 +100,16 @@ def cmd_prime(args):
 
     if args.mode == "session" and not task:
         # Session mode: include project structure + memories (no code grep without task)
-        output = "## Project Context (auto-primed at session start)\n\n"
+        # Still apply trust boundaries — source content is reference material
+        output = "# Primed Context (Session Start)\n\n"
+        output += (
+            "> This context was auto-assembled at session start. "
+            "It is your **starting point** — explore beyond it as needed.\n\n"
+        )
         for src in sources.sources:
-            output += f"### [{src.category}] {src.name}\n{src.content}\n\n"
+            safe = src.content.replace("</source-content>", "&lt;/source-content&gt;")
+            output += f"### [{src.category}] {src.name}\n"
+            output += f"<source-content name=\"{src.name}\">\n{safe}\n</source-content>\n\n"
         print(output)
         return
 
@@ -158,7 +171,7 @@ def cmd_gather(args):
 
     project_dir = os.path.abspath(args.project)
     memory_paths = args.memory.split(",") if args.memory else None
-    sources = gather_all(project_dir, memory_paths)
+    sources = gather_all(project_dir, memory_paths=memory_paths)
 
     if args.format == "json":
         output = {
