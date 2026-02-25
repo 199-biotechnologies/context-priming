@@ -3,7 +3,7 @@
 from context_prime.core.gather import gather_all
 from context_prime.core.score import score_relevance, filter_relevant
 from context_prime.core.hierarchy import infer_hierarchy
-from context_prime.core.synthesize import synthesize_context, format_primed_context
+from context_prime.core.synthesize import assemble_context
 
 
 def prime_for_api(
@@ -49,9 +49,8 @@ def prime_for_api(
     project_context = "\n".join(s.source.content[:500] for s in relevant[:5])
     hierarchy = infer_hierarchy(task, project_context, llm_call)
 
-    # Synthesize
-    synthesized = synthesize_context(task, hierarchy, relevant, llm_call)
-    primed = format_primed_context(task, hierarchy, synthesized)
+    # Assemble — full source content + brief executive summary
+    primed = assemble_context(task, hierarchy, relevant, llm_call)
 
     return {
         "system_prompt": primed,

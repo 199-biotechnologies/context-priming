@@ -1,61 +1,107 @@
-"""Context synthesis — combine relevant sources into a primed context block."""
+"""Context synthesis — assemble relevant sources into a primed context block.
+
+Design philosophy: Context Priming is about SELECTION, not compression.
+The scoring step decides what's relevant. The synthesis step assembles it.
+
+A primed context can use 5k, 25k, or 40k tokens — as long as it's all
+relevant to the task. The constraint is a percentage of available context
+(default 25%), not a fixed small number. Including full source content is
+better than a lossy summary. The agent needs the actual data.
+"""
 
 from context_prime.core.score import ScoredSource
 
 
-SYNTHESIS_PROMPT = """Synthesize the following sources into an optimal primed context for a coding agent.
+# Light synthesis prompt — just a brief executive summary, not a rewrite
+BRIEF_SYNTHESIS_PROMPT = """Write a 3-5 sentence executive summary for a coding agent about to work on this task.
 
-## Task
-{task}
+Task: {task}
 
-## Outcome Hierarchy
+Outcome Hierarchy:
 - Immediate: {immediate}
 - Mid-term: {midterm}
 - Final: {final}
 
-## Relevant Sources (scored by relevance)
-{sources_block}
+Key sources available: {source_names}
 
-## Instructions
-Create a single, coherent "Primed Context" document that a coding agent
-will use as its starting context before working on this task.
-
-Rules:
-1. Synthesize, don't concatenate. Merge overlapping information.
-2. Lead with what matters most for THIS specific task.
-3. Include specific file paths, function names, and code patterns.
-4. Surface past mistakes and lessons that apply to this task type.
-5. Note constraints and conventions the agent must follow.
-6. Keep the outcome hierarchy visible so the agent understands the bigger picture.
-7. Be dense. Every sentence should carry information the agent needs.
-8. Target 1500-3000 tokens. Enough to be useful, short enough to leave room for work.
-
-Format the output as a markdown document with clear sections."""
+Write ONLY the summary paragraph. Be specific about what files to touch, what to watch out for, and what the real goal is. No headers, no formatting — just the paragraph."""
 
 
-def build_synthesis_prompt(
+def assemble_context(
     task: str,
     hierarchy: dict,
     relevant_sources: list[ScoredSource],
+    llm_call=None,
 ) -> str:
-    """Build the prompt for context synthesis."""
-    sources_block = ""
-    for ss in relevant_sources:
-        sources_block += (
-            f"\n### [{ss.source.category}] {ss.source.name} "
-            f"(relevance: {ss.score:.1f})\n"
-            f"{ss.source.content}\n"
+    """Assemble relevant sources into a primed context block.
+
+    This is the primary synthesis function. It includes full source content
+    (not summaries) because the value is in selection, not compression.
+    The scoring step already filtered irrelevant sources. What remains
+    should be included in full.
+
+    If llm_call is provided, adds a brief executive summary at the top.
+    If not, assembles sources directly (zero LLM calls, instant).
+
+    Args:
+        task: The user's task description.
+        hierarchy: Outcome hierarchy dict from infer_hierarchy().
+        relevant_sources: Filtered, scored sources from filter_relevant().
+        llm_call: Optional callable(prompt: str) -> str. If provided,
+                  generates a brief executive summary. If None, skips it.
+
+    Returns:
+        A markdown string — the primed context ready for injection.
+    """
+    parts = []
+
+    # Header
+    parts.append("# Primed Context\n")
+    parts.append("> Auto-assembled from project sources scored for task relevance.\n")
+
+    # Outcome hierarchy
+    parts.append("## Outcome Hierarchy\n")
+    final = hierarchy.get("final")
+    midterm = hierarchy.get("midterm")
+    immediate = hierarchy.get("immediate", task)
+    if final:
+        parts.append(f"- **Final goal:** {final}")
+    if midterm:
+        parts.append(f"- **Mid-term:** {midterm}")
+    parts.append(f"- **Immediate task:** {immediate}")
+    parts.append("")
+
+    # Brief executive summary (1 LLM call, fast)
+    if llm_call:
+        source_names = ", ".join(
+            f"{s.source.name} ({s.source.category})" for s in relevant_sources
         )
+        prompt = BRIEF_SYNTHESIS_PROMPT.format(
+            task=task,
+            immediate=immediate,
+            midterm=midterm or "Not inferred",
+            final=final or "Not inferred",
+            source_names=source_names,
+        )
+        summary = llm_call(prompt)
+        parts.append("## Summary\n")
+        parts.append(summary.strip())
+        parts.append("")
 
-    return SYNTHESIS_PROMPT.format(
-        task=task,
-        immediate=hierarchy.get("immediate", task),
-        midterm=hierarchy.get("midterm") or "Not inferred",
-        final=hierarchy.get("final") or "Not inferred",
-        sources_block=sources_block,
-    )
+    # Full source content — ordered by relevance, highest first
+    parts.append("## Relevant Sources\n")
+    for ss in relevant_sources:
+        parts.append(
+            f"### [{ss.source.category}] {ss.source.name} "
+            f"(relevance: {ss.score:.2f})\n"
+        )
+        parts.append(ss.source.content)
+        parts.append("")
+
+    return "\n".join(parts)
 
 
+# Keep the old function name as an alias for backward compatibility
 def synthesize_context(
     task: str,
     hierarchy: dict,
@@ -64,17 +110,11 @@ def synthesize_context(
 ) -> str:
     """Synthesize relevant sources into a primed context block.
 
-    Args:
-        task: The user's task description.
-        hierarchy: Outcome hierarchy dict from infer_hierarchy().
-        relevant_sources: Filtered, scored sources from filter_relevant().
-        llm_call: A callable(prompt: str) -> str that calls an LLM.
-
-    Returns:
-        A markdown string — the primed context ready for injection.
+    Now delegates to assemble_context which includes full source content
+    instead of compressing into a tiny summary. Uses 1 fast LLM call for
+    a brief executive summary, then includes sources in full.
     """
-    prompt = build_synthesis_prompt(task, hierarchy, relevant_sources)
-    return llm_call(prompt)
+    return assemble_context(task, hierarchy, relevant_sources, llm_call)
 
 
 def format_primed_context(
@@ -82,14 +122,19 @@ def format_primed_context(
     hierarchy: dict,
     synthesized: str,
 ) -> str:
-    """Wrap the synthesized context with standard framing.
+    """Format compatibility wrapper.
 
-    This produces the final primed context block that gets injected
-    into the coding agent's context window.
+    With the new assemble_context, the output is already fully formatted.
+    This function exists for backward compatibility with code that calls
+    synthesize_context() + format_primed_context() separately.
     """
+    # If synthesized already has the header (from assemble_context), return as-is
+    if synthesized.startswith("# Primed Context"):
+        return synthesized
+
+    # Legacy path: wrap raw synthesis output
     header = "# Primed Context\n\n"
-    header += "> This context was automatically synthesized for your current task.\n"
-    header += "> It draws from project memories, codebase analysis, and past lessons.\n\n"
+    header += "> This context was automatically synthesized for your current task.\n\n"
 
     goal_section = "## Outcome Hierarchy\n\n"
     goal_section += f"- **Final goal:** {hierarchy.get('final') or 'Not inferred'}\n"

@@ -68,7 +68,7 @@ def cmd_prime(args):
     from context_prime.core.gather import gather_all
     from context_prime.core.score import score_relevance, filter_relevant
     from context_prime.core.hierarchy import infer_hierarchy
-    from context_prime.core.synthesize import synthesize_context, format_primed_context
+    from context_prime.core.synthesize import assemble_context
 
     llm_call = get_llm_call(args.model)
     project_dir = os.path.abspath(args.project)
@@ -88,22 +88,12 @@ def cmd_prime(args):
         )
 
     if args.mode == "session" and not args.task:
-        # Session mode: just output gathered context summary, no task-specific scoring
+        # Session mode: include full source content, no scoring needed
         output = "## Project Context (auto-primed at session start)\n\n"
         for src in sources.sources:
-            if src.category in ("codebase", "config"):
-                content = src.content[:500]
-                output += f"### {src.name}\n{content}\n\n"
+            output += f"### [{src.category}] {src.name}\n{src.content}\n\n"
 
-        # Include all memories
-        for src in sources.sources:
-            if src.category == "memories":
-                output += f"### Memory: {src.name}\n{src.content}\n\n"
-
-        if args.format == "hook":
-            print(output)
-        else:
-            print(output)
+        print(output)
         return
 
     task = args.task or "General development work"
@@ -113,11 +103,20 @@ def cmd_prime(args):
         print("[score] Scoring relevance...", file=sys.stderr)
     scored = score_relevance(task, sources, llm_call)
 
-    # Filter
-    relevant = filter_relevant(scored, args.threshold, args.max_tokens)
+    # Filter — budget is % of available context, include full content
+    relevant = filter_relevant(
+        scored, args.threshold,
+        context_budget_pct=args.budget,
+        platform=args.platform,
+    )
     if args.verbose:
+        budget_tokens = int({
+            "claude_code": 120_000, "claude_api": 200_000,
+            "gemini_cli": 1_000_000, "default": 128_000,
+        }.get(args.platform, 128_000) * args.budget)
         print(
-            f"[filter] Kept {len(relevant)}/{len(scored)} sources",
+            f"[filter] Kept {len(relevant)}/{len(scored)} sources "
+            f"(budget: {args.budget:.0%} = ~{budget_tokens:,} tokens)",
             file=sys.stderr,
         )
 
@@ -127,11 +126,10 @@ def cmd_prime(args):
     project_context = "\n".join(s.source.content[:500] for s in relevant[:5])
     hierarchy = infer_hierarchy(task, project_context, llm_call)
 
-    # Synthesize
+    # Assemble — full source content + brief exec summary
     if args.verbose:
-        print("[synthesize] Building primed context...", file=sys.stderr)
-    synthesized = synthesize_context(task, hierarchy, relevant, llm_call)
-    primed = format_primed_context(task, hierarchy, synthesized)
+        print("[assemble] Building primed context...", file=sys.stderr)
+    primed = assemble_context(task, hierarchy, relevant, llm_call)
 
     # Output
     if args.format == "json":
@@ -193,7 +191,11 @@ def main():
     p_prime.add_argument("--memory", "-m", help="Comma-separated memory paths")
     p_prime.add_argument("--model", default="claude-sonnet-4-6", help="LLM model for priming")
     p_prime.add_argument("--threshold", type=float, default=0.5, help="Relevance threshold")
-    p_prime.add_argument("--max-tokens", type=int, default=50000, help="Max context tokens")
+    p_prime.add_argument("--budget", type=float, default=0.25,
+                         help="Context budget as fraction of platform context (default 0.25)")
+    p_prime.add_argument("--platform", default="claude_code",
+                         choices=["claude_code", "claude_api", "gemini_cli", "opencode", "codex_cli"],
+                         help="Target platform for budget calculation")
     p_prime.add_argument("--mode", choices=["task", "session"], default="task")
     p_prime.add_argument("--format", choices=["text", "json", "hook"], default="text")
     p_prime.add_argument("--verbose", "-v", action="store_true")

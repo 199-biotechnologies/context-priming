@@ -118,21 +118,47 @@ def score_relevance(
     return scored
 
 
+# Default context budgets for known platforms (coding-available tokens)
+PLATFORM_CONTEXT_BUDGETS = {
+    "claude_code": 120_000,   # Claude Code reserves ~80k for tools/MCP
+    "claude_api": 200_000,    # Raw API, full window
+    "opencode": 128_000,
+    "gemini_cli": 1_000_000,  # Gemini 3 Pro
+    "codex_cli": 200_000,
+    "default": 128_000,
+}
+
+
 def filter_relevant(
     scored_sources: list[ScoredSource],
     threshold: float = 0.5,
-    max_tokens: int = 50000,
+    max_tokens: int | None = None,
+    context_budget_pct: float = 0.25,
+    platform: str = "claude_code",
 ) -> list[ScoredSource]:
-    """Filter scored sources by threshold and token budget.
+    """Filter scored sources by threshold and context budget.
+
+    The budget is a percentage of the platform's available coding context,
+    not a fixed token count. Context Priming should use up to 25% of
+    available context with highly relevant sources — the value is in
+    selection, not compression.
 
     Args:
         scored_sources: Sources with scores, sorted by score descending.
         threshold: Minimum score to include (default 0.5).
-        max_tokens: Maximum total tokens to include.
+        max_tokens: Explicit token limit (overrides percentage calculation).
+        context_budget_pct: Fraction of platform context to use (default 0.25).
+        platform: Platform name for budget lookup (default "claude_code").
 
     Returns:
         Filtered list respecting both threshold and token budget.
     """
+    if max_tokens is None:
+        total_context = PLATFORM_CONTEXT_BUDGETS.get(
+            platform, PLATFORM_CONTEXT_BUDGETS["default"]
+        )
+        max_tokens = int(total_context * context_budget_pct)
+
     filtered = []
     token_count = 0
 

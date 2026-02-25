@@ -4,13 +4,13 @@ import asyncio
 from context_prime.core.gather import gather_all
 from context_prime.core.score import score_relevance, filter_relevant
 from context_prime.core.hierarchy import infer_hierarchy
-from context_prime.core.synthesize import synthesize_context, format_primed_context
+from context_prime.core.synthesize import assemble_context
 
 
 def make_anthropic_llm_call(model: str = "claude-sonnet-4-6"):
     """Create an LLM call function using the Anthropic API.
 
-    Uses a fast model for priming steps (scoring, hierarchy, synthesis)
+    Uses a fast model for priming steps (scoring, hierarchy, summary)
     to minimize overhead before the main agent starts.
     """
     from anthropic import Anthropic
@@ -33,17 +33,23 @@ def prime(
     memory_paths: list[str] | None = None,
     priming_model: str = "claude-sonnet-4-6",
     relevance_threshold: float = 0.5,
-    max_context_tokens: int = 50000,
+    context_budget_pct: float = 0.25,
+    platform: str = "claude_code",
 ) -> str:
     """Run the full priming pipeline and return the primed context.
+
+    The primed context includes FULL source content for relevant sources,
+    not compressed summaries. The budget is a percentage of available
+    context (default 25% of 120k for Claude Code = 30k tokens).
 
     Args:
         task: The user's task description.
         project_dir: Path to the project directory.
         memory_paths: Optional list of memory file/directory paths.
-        priming_model: Model to use for priming steps (fast model recommended).
+        priming_model: Model for priming steps (fast model recommended).
         relevance_threshold: Minimum relevance score to include a source.
-        max_context_tokens: Maximum tokens for the primed context sources.
+        context_budget_pct: Fraction of platform context to use (default 0.25).
+        platform: Platform name for budget calculation.
 
     Returns:
         A formatted primed context string ready for agent injection.
@@ -56,22 +62,21 @@ def prime(
     # 2. Score relevance against the task
     scored = score_relevance(task, sources, llm_call)
 
-    # 3. Filter to relevant sources
-    relevant = filter_relevant(scored, relevance_threshold, max_context_tokens)
+    # 3. Filter — include full content, budget is % of available context
+    relevant = filter_relevant(
+        scored, relevance_threshold,
+        context_budget_pct=context_budget_pct,
+        platform=platform,
+    )
 
-    # 4. Build project context for hierarchy inference
+    # 4. Infer outcome hierarchy
     project_context = "\n".join(
         s.source.content[:500] for s in relevant[:5]
     )
-
-    # 5. Infer outcome hierarchy
     hierarchy = infer_hierarchy(task, project_context, llm_call)
 
-    # 6. Synthesize into primed context
-    synthesized = synthesize_context(task, hierarchy, relevant, llm_call)
-
-    # 7. Format with standard framing
-    return format_primed_context(task, hierarchy, synthesized)
+    # 5. Assemble — full source content + brief executive summary
+    return assemble_context(task, hierarchy, relevant, llm_call)
 
 
 async def run_primed_agent(
