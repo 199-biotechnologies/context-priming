@@ -8,8 +8,28 @@ from pathlib import Path
 
 
 def get_llm_call(model: str = "claude-sonnet-4-6"):
-    """Create an LLM call function. Tries Anthropic first, then OpenAI."""
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    """Create an LLM call function. Tries OpenRouter, Anthropic, then OpenAI."""
+    if os.environ.get("OPENROUTER_API_KEY"):
+        from openai import OpenAI
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.environ["OPENROUTER_API_KEY"],
+        )
+        # Map short model names to OpenRouter format
+        or_model = model
+        if "/" not in model:
+            or_model = f"anthropic/{model}"
+
+        def call(prompt: str) -> str:
+            r = client.chat.completions.create(
+                model=or_model,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return r.choices[0].message.content
+        return call
+
+    elif os.environ.get("ANTHROPIC_API_KEY"):
         from anthropic import Anthropic
         client = Anthropic()
 
@@ -37,7 +57,7 @@ def get_llm_call(model: str = "claude-sonnet-4-6"):
 
     else:
         print(
-            "Error: Set ANTHROPIC_API_KEY or OPENAI_API_KEY.",
+            "Error: Set OPENROUTER_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY.",
             file=sys.stderr,
         )
         sys.exit(1)

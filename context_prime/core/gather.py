@@ -42,13 +42,28 @@ def gather_memories(project_dir: str, memory_paths: list[str] | None = None) -> 
     if memory_paths:
         search_paths = [Path(p) for p in memory_paths]
     else:
-        # Default memory locations
+        # Default memory locations — scoped to this project
         candidates = [
             project / "MEMORY.md",
             project / ".claude" / "memory",
             Path.home() / ".claude" / "memory",
-            Path.home() / ".claude" / "projects",
         ]
+        # Look for project-specific memory directory (keyed by path)
+        projects_dir = Path.home() / ".claude" / "projects"
+        if projects_dir.is_dir():
+            # Find the memory dir that matches this project's path
+            project_abs = project.resolve()
+            for pdir in projects_dir.iterdir():
+                if not pdir.is_dir():
+                    continue
+                # Claude Code encodes paths with dashes: /Users/foo/bar → -Users-foo-bar
+                encoded = str(project_abs).replace("/", "-")
+                if encoded in pdir.name or pdir.name in encoded:
+                    memory_dir = pdir / "memory"
+                    if memory_dir.is_dir():
+                        candidates.append(memory_dir)
+                    break
+
         for c in candidates:
             if c.exists():
                 search_paths.append(c)
@@ -105,9 +120,16 @@ def gather_codebase(project_dir: str, max_depth: int = 3) -> list[Source]:
         "CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md",
         "Makefile", "docker-compose.yml",
     ]
+    seen_inodes = set()
     for fname in key_files:
         fpath = project / fname
         if fpath.is_file():
+            # Deduplicate files (e.g. README.md and readme.md on case-insensitive FS)
+            inode = fpath.stat().st_ino
+            if inode in seen_inodes:
+                continue
+            seen_inodes.add(inode)
+
             content = fpath.read_text(errors="replace")
             # Truncate very large files
             if len(content) > 8000:
